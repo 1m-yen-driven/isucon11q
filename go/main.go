@@ -735,7 +735,7 @@ func getIsuGraph(c echo.Context) error {
 	// conditional get
 	if c.Request().Header.Get("If-Modified-Since") != "" {
 		// set header applicatoin/json
-		c.Response().Header().Set("Content-Type", "application/json")
+		c.Response().Header().Set("Content-Type", "text/plain")
 		return c.NoContent(http.StatusNotModified)
 	}
 
