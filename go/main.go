@@ -787,7 +787,10 @@ func getIsuGraph(c echo.Context) error {
 				isCompleteGraph = true
 			}
 			if isCompleteGraph {
-				c.Response().Header().Set("Cache-Control", "public, max-age=3600000")
+
+				// add http last-modified header
+				c.Response().Header().Set("Last-Modified", time.Now().Format(http.TimeFormat))
+				//c.Response().Header().Set("Cache-Control", "public, max-age=3600000")
 			}
 		}
 	}
@@ -1258,6 +1261,7 @@ func postIsuCondition(c echo.Context) error {
 		return timestampList[i].Unix() < timestampList[j].Unix()
 	})
 
+	c.Logger().Infof("post isu condition: %s, %v", jiaIsuUUID, timestampList[0].Truncate(time.Hour*24).AddDate(0, 0, -2))
 	completeGraphMap.Store(jiaIsuUUID, timestampList[0].Truncate(time.Hour*24).AddDate(0, 0, -2))
 	return c.NoContent(http.StatusAccepted)
 }
