@@ -1,1 +1,13 @@
 /sql/1_InitData.sql
+
+rust/
+ruby/
+python/
+php/
+perl/
+nodejs/
+
+
+ec256-public.pem
+public/assets/
+NoImage.jpg
