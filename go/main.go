@@ -1258,7 +1258,7 @@ func postIsuCondition(c echo.Context) error {
 		values = append(values, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
 	}
 
-	conditioinCh <- values
+	conditionCh <- values
 
 	return c.NoContent(http.StatusAccepted)
 }
