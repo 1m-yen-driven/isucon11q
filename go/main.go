@@ -26,6 +26,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -210,6 +211,7 @@ func init() {
 
 func main() {
 	go func() { log_.Println(http.ListenAndServe(":9009", nil)) }()
+	go trendForgetLoop()
 	e := echo.New()
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
@@ -1077,14 +1079,40 @@ func calculateConditionLevel(condition string) (string, error) {
 	return conditionLevel, nil
 }
 
+var trendGroup = new(singleflight.Group)
+
+const trendGroupKey = "trendGroupKey"
+const trendGroupForgetInterval = 500 * time.Millisecond
+
 // GET /api/trend
 // ISUの性格毎の最新のコンディション情報
 func getTrend(c echo.Context) error {
-	characterList := []string{}
-	err := db.Select(&characterList, "SELECT `character` FROM `isu` GROUP BY `character`")
+	res, err, _ := trendGroup.Do(trendGroupKey, func() (interface{}, error) {
+		res, err := getTrendImpl()
+		return res, err
+	})
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+	return c.JSON(http.StatusOK, res)
+}
+
+func trendForgetLoop() {
+	ticker := time.Tick(trendGroupForgetInterval)
+	for {
+		select {
+		case <-ticker:
+			trendGroup.Forget(trendGroupKey)
+		}
+	}
+}
+
+func getTrendImpl() ([]TrendResponse, error) {
+	characterList := []string{}
+	err := db.Select(&characterList, "SELECT `character` FROM `isu` GROUP BY `character`")
+	if err != nil {
+		return nil, err
 	}
 
 	res := []TrendResponse{}
@@ -1094,8 +1122,7 @@ func getTrend(c echo.Context) error {
 		"SELECT * FROM `isu`",
 	)
 	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+		return nil, err
 	}
 
 	characterInfoIsuConditions := make(map[string][]*TrendCondition)
@@ -1116,15 +1143,13 @@ func getTrend(c echo.Context) error {
 			if err == sql.ErrNoRows {
 				continue
 			}
-			c.Logger().Errorf("db error: %v", err)
-			return c.NoContent(http.StatusInternalServerError)
+			return nil, err
 		}
 
 		isuLastCondition := condition
 		conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
 		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
+			return nil, err
 		}
 		trendCondition := TrendCondition{
 			ID:        isu.ID,
@@ -1160,7 +1185,7 @@ func getTrend(c echo.Context) error {
 			})
 	}
 
-	return c.JSON(http.StatusOK, res)
+	return res, nil
 }
 
 // POST /api/condition/:jia_isu_uuid
