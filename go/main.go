@@ -212,6 +212,7 @@ func init() {
 func main() {
 	go func() { log_.Println(http.ListenAndServe(":9009", nil)) }()
 	go trendForgetLoop()
+	go InsertIsuConditionLoop()
 	e := echo.New()
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
@@ -1189,6 +1190,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 }
 
 const conditionInsertInterval = 500 * time.Millisecond
+
 var conditionCh = make(chan []interface{}, 100)
 
 func InsertIsuConditionLoop() {
@@ -1208,7 +1210,7 @@ func InsertIsuConditionLoop() {
 				log_.Printf("insert condition error: %v", err)
 			}
 			values = values[:0]
-		case vs := <- conditionCh:
+		case vs := <-conditionCh:
 			values = append(values, vs...)
 		}
 	}
@@ -1218,7 +1220,7 @@ func InsertIsuConditionLoop() {
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-	dropProbability := 0.0
+	dropProbability := 0.9
 	if rand.Float64() <= dropProbability {
 		// c.Logger().Warnf("drop post isu condition request")
 		return c.NoContent(http.StatusAccepted)
