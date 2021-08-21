@@ -1131,7 +1131,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 	isuList := []Isu{}
 	err = db.Select(&isuList,
-		"SELECT * FROM `isu`",
+		"SELECT `id`, `jia_isu_uuid`, `character` FROM `isu`",
 	)
 	if err != nil {
 		return nil, err
@@ -1148,7 +1148,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 	for _, isu := range isuList {
 		condition := IsuCondition{}
 		err = db.Get(&condition,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
+			"SELECT `condition`, `timestamp` FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
 			isu.JIAIsuUUID,
 		)
 		if err != nil {
