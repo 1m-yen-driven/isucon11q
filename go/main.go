@@ -84,13 +84,14 @@ type GetIsuListResponse struct {
 }
 
 type IsuCondition struct {
-	ID         int       `db:"id"`
-	JIAIsuUUID string    `db:"jia_isu_uuid"`
-	Timestamp  time.Time `db:"timestamp"`
-	IsSitting  bool      `db:"is_sitting"`
-	Condition  string    `db:"condition"`
-	Message    string    `db:"message"`
-	CreatedAt  time.Time `db:"created_at"`
+	ID             int       `db:"id"`
+	JIAIsuUUID     string    `db:"jia_isu_uuid"`
+	Timestamp      time.Time `db:"timestamp"`
+	IsSitting      bool      `db:"is_sitting"`
+	Condition      string    `db:"condition"`
+	Message        string    `db:"message"`
+	CreatedAt      time.Time `db:"created_at"`
+	ConditionCount int       `db:"condition_count"`
 }
 
 type MySQLConnectionEnv struct {
@@ -1012,28 +1013,40 @@ func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, c
 
 	conditions := []IsuCondition{}
 	var err error
+	conditionsResponse := []*GetIsuConditionResponse{}
+
+	acceptableCounts := []string{"-1"}
+	if _, ok := conditionLevel[conditionLevelInfo]; ok {
+		acceptableCounts = append(acceptableCounts, "0")
+	}
+	if _, ok := conditionLevel[conditionLevelWarning]; ok {
+		acceptableCounts = append(acceptableCounts, "1", "2")
+	}
+	if _, ok := conditionLevel[conditionLevelCritical]; ok {
+		acceptableCounts = append(acceptableCounts, "3")
+	}
 
 	if startTime.IsZero() {
 		err = db.Select(&conditions,
 			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ?"+
 				"	AND `timestamp` < ?"+
-				"	ORDER BY `timestamp` DESC",
-			jiaIsuUUID, endTime,
+				"	AND `condition_count` IN ("+strings.Join(acceptableCounts, ",")+")"+
+				"	ORDER BY `timestamp` DESC LIMIT ?",
+			jiaIsuUUID, endTime, conditionLimit,
 		)
 	} else {
 		err = db.Select(&conditions,
 			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ?"+
 				"	AND `timestamp` < ?"+
 				"	AND ? <= `timestamp`"+
-				"	ORDER BY `timestamp` DESC",
-			jiaIsuUUID, endTime, startTime,
+				"	AND `condition_count` IN ("+strings.Join(acceptableCounts, ",")+")"+
+				"	ORDER BY `timestamp` DESC LIMIT ?",
+			jiaIsuUUID, endTime, startTime, conditionLimit,
 		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("db error: %v", err)
 	}
-
-	conditionsResponse := []*GetIsuConditionResponse{}
 	for _, c := range conditions {
 		cLevel, err := calculateConditionLevel(c.Condition)
 		if err != nil {
@@ -1052,10 +1065,6 @@ func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, c
 			}
 			conditionsResponse = append(conditionsResponse, &data)
 		}
-	}
-
-	if len(conditionsResponse) > limit {
-		conditionsResponse = conditionsResponse[:limit]
 	}
 
 	return conditionsResponse, nil
@@ -1199,12 +1208,15 @@ func InsertIsuConditionLoop() {
 	for {
 		select {
 		case <-ticker:
+			if len(values) == 0 {
+				continue
+			}
 			_, err := db.Exec(
 				"INSERT INTO `isu_condition`"+
-					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
+					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
 					"	VALUES "+
-					strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?),",
-						len(values)/5), ","), values...,
+					strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?, ?),",
+						len(values)/6), ","), values...,
 			)
 			if err != nil {
 				log_.Printf("insert condition error: %v", err)
@@ -1257,7 +1269,7 @@ func postIsuCondition(c echo.Context) error {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
-		values = append(values, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		values = append(values, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message, strings.Count(cond.Condition, "=true"))
 	}
 
 	conditionCh <- values
