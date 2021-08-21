@@ -1188,11 +1188,37 @@ func getTrendImpl() ([]TrendResponse, error) {
 	return res, nil
 }
 
+const conditionInsertInterval = 500 * time.Millisecond
+var conditionCh = make(chan []interface{}, 100)
+
+func InsertIsuConditionLoop() {
+	ticker := time.Tick(conditionInsertInterval)
+	values := make([]interface{}, 0, 10000)
+	for {
+		select {
+		case <-ticker:
+			_, err := db.Exec(
+				"INSERT INTO `isu_condition`"+
+					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
+					"	VALUES "+
+					strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?),",
+						len(values)/5), ","), values...,
+			)
+			if err != nil {
+				log_.Printf("insert condition error: %v", err)
+			}
+			values = values[:0]
+		case vs := <- conditionCh:
+			values = append(values, vs...)
+		}
+	}
+}
+
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-	dropProbability := 0.9
+	dropProbability := 0.0
 	if rand.Float64() <= dropProbability {
 		// c.Logger().Warnf("drop post isu condition request")
 		return c.NoContent(http.StatusAccepted)
@@ -1211,15 +1237,8 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	tx, err := db.Beginx()
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
 	var count int
-	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?", jiaIsuUUID)
+	err = db.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?", jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1228,6 +1247,7 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
+	values := []interface{}{}
 	for _, cond := range req {
 		timestamp := time.Unix(cond.Timestamp, 0)
 
@@ -1235,23 +1255,10 @@ func postIsuCondition(c echo.Context) error {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
-		_, err = tx.Exec(
-			"INSERT INTO `isu_condition`"+
-				"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
-				"	VALUES (?, ?, ?, ?, ?)",
-			jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
-		if err != nil {
-			c.Logger().Errorf("db error: %v", err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-
+		values = append(values, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
 	}
 
-	err = tx.Commit()
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	conditioinCh <- values
 
 	return c.NoContent(http.StatusAccepted)
 }
