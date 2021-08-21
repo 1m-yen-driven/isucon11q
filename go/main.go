@@ -732,6 +732,10 @@ func getIsuGraph(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	// conditional get
+	if c.Request().Header.Get("If-Modified-Since") != "" {
+		return c.NoContent(http.StatusNotModified)
+	}
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	datetimeStr := c.QueryParam("datetime")
