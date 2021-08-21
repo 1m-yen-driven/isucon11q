@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -53,6 +54,7 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
+	completeGraphMap              sync.Map
 )
 
 type Config struct {
@@ -736,6 +738,12 @@ func getIsuGraph(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	// conditional get
+	if c.Request().Header.Get("If-Modified-Since") != "" {
+		// set header applicatoin/json
+		// c.Response().Header().Set("Content-Type", "application/json")
+		return c.JSON(http.StatusNotModified, nil)
+	}
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	datetimeStr := c.QueryParam("datetime")
@@ -776,6 +784,23 @@ func getIsuGraph(c echo.Context) error {
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+	isCompleteGraph := false
+	// 完成グラフかの判定処理
+	vvv, ok := completeGraphMap.Load(jiaIsuUUID)
+	if ok {
+		latestCompleteDate, ok := vvv.(time.Time)
+		if ok {
+			if latestCompleteDate.After(date.Truncate(time.Hour * 24)) {
+				isCompleteGraph = true
+			}
+			if isCompleteGraph {
+
+				// add http last-modified header
+				c.Response().Header().Set("Last-Modified", time.Now().Format(http.TimeFormat))
+				//c.Response().Header().Set("Cache-Control", "public, max-age=3600000")
+			}
+		}
 	}
 
 	return c.JSON(http.StatusOK, res)
@@ -1276,6 +1301,18 @@ func postIsuCondition(c echo.Context) error {
 
 	conditionCh <- values
 
+	timestampList := make([]time.Time, 0, len(req))
+
+	for _, cond := range req {
+		timestamp := time.Unix(cond.Timestamp, 0)
+		timestampList = append(timestampList, timestamp)
+	}
+	sort.Slice(timestampList, func(i, j int) bool {
+		return timestampList[i].Unix() < timestampList[j].Unix()
+	})
+
+	c.Logger().Infof("post isu condition: %s, %v", jiaIsuUUID, timestampList[0].Truncate(time.Hour*24).AddDate(0, 0, -2))
+	completeGraphMap.Store(jiaIsuUUID, timestampList[0].Truncate(time.Hour*24).AddDate(0, 0, -2))
 	return c.NoContent(http.StatusAccepted)
 }
 
