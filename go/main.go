@@ -1143,18 +1143,15 @@ func trendForgetLoop() {
 }
 
 func getTrendImpl() ([]TrendResponse, error) {
-	characterList := []string{}
-	err := db.Select(&characterList, "SELECT `character` FROM `isu` GROUP BY `character`")
-	if err != nil {
-		return nil, err
+	characterList := []string{
+		"いじっぱり", "うっかりや", "おくびょう", "おだやか", "おっとり",
+		"おとなしい", "がんばりや", "きまぐれ", "さみしがり", "しんちょう",
+		"すなお", "ずぶとい", "せっかち", "てれや", "なまいき",
+		"のうてんき", "のんき", "ひかえめ", "まじめ", "むじゃき",
+		"やんちゃ", "ゆうかん", "ようき", "れいせい", "わんぱく",
 	}
-
-	res := []TrendResponse{}
-
 	isuList := []Isu{}
-	err = db.Select(&isuList,
-		"SELECT * FROM `isu`",
-	)
+	err := db.Select(&isuList, "SELECT * FROM `isu`")
 	if err != nil {
 		return nil, err
 	}
@@ -1200,6 +1197,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 	}
 
+	res := []TrendResponse{}
 	for _, c := range characterList {
 		sort.Slice(characterInfoIsuConditions[c], func(i, j int) bool {
 			return characterInfoIsuConditions[c][i].Timestamp > characterInfoIsuConditions[c][j].Timestamp
