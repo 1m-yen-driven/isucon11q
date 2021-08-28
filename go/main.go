@@ -1249,6 +1249,7 @@ func postIsuCondition(c echo.Context) error {
 	req := lib.PostIsuConditionRequests{}
 	//read all request body
 	b, err := io.ReadAll(c.Request().Body)
+	defer c.Request().Body.Close()
 	if err != nil {
 		return c.String(http.StatusBadRequest, "failed to read request body")
 	}
