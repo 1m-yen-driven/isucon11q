@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -47,6 +48,7 @@ const (
 var (
 	db                  *sqlx.DB
 	sessionStore        sessions.Store
+	sessionCache        = sync.Map{}
 	mySQLConnectionData *MySQLConnectionEnv
 
 	jiaJWTSigningKey *ecdsa.PublicKey
@@ -274,18 +276,28 @@ func getSession(r *http.Request) (*sessions.Session, error) {
 }
 
 func getUserIDFromSession(c echo.Context) (string, int, error) {
-	session, err := getSession(c.Request())
+	r := c.Request()
+	cookie, err := r.Cookie(sessionName)
 	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("failed to get session: %v", err)
-	}
-	_jiaUserID, ok := session.Values["jia_user_id"]
-	if !ok {
 		return "", http.StatusUnauthorized, fmt.Errorf("no session")
 	}
+	var jiaUserID string
+	if val, ok := sessionCache.Load(cookie.Value); ok {
+		jiaUserID = val.(string)
+	} else {
+		session, err := getSession(r)
+		if err != nil {
+			return "", http.StatusUnauthorized, fmt.Errorf("no session")
+		}
+		userID, ok := session.Values["jia_user_id"]
+		if !ok {
+			return "", http.StatusUnauthorized, fmt.Errorf("no session")
+		}
+		jiaUserID = userID.(string)
+		sessionCache.Store(cookie.Value, jiaUserID)
+	}
 
-	jiaUserID := _jiaUserID.(string)
 	var count int
-
 	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
 		jiaUserID)
 	if err != nil {
@@ -319,7 +331,7 @@ func postInitialize(c echo.Context) error {
 	if err != nil {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
-
+	sessionCache = sync.Map{}
 	cmd := exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
