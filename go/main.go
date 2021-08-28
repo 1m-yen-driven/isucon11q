@@ -482,7 +482,7 @@ func getIsuList(c echo.Context) error {
 	for _, isu := range isuList {
 		var lastCondition IsuCondition
 		foundLastCondition := true
-		err = tx.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
+		err = tx.Get(&lastCondition, "SELECT * FROM `latest_isu_condition` WHERE `jia_isu_uuid` = ? LIMIT 1",
 			isu.JIAIsuUUID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -1129,9 +1129,14 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 	res := []TrendResponse{}
 
-	isuList := []Isu{}
+	type IsuWithCondition struct {
+		Isu
+		Condition string    `db:"condition"`
+		Timestamp time.Time `db:"timestamp"`
+	}
+	isuList := []IsuWithCondition{}
 	err = db.Select(&isuList,
-		"SELECT * FROM `isu`",
+		"SELECT `isu`.`id`, `isu`.`character`, `isu`.`jia_isu_uuid`, `lic`.`condition`, `lic`.`timestamp` FROM `isu` INNER JOIN `latest_isu_condition` AS `lic` USING(`jia_isu_uuid`)",
 	)
 	if err != nil {
 		return nil, err
@@ -1146,26 +1151,13 @@ func getTrendImpl() ([]TrendResponse, error) {
 		characterCriticalIsuConditions[character] = []*TrendCondition{}
 	}
 	for _, isu := range isuList {
-		condition := IsuCondition{}
-		err = db.Get(&condition,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
-			isu.JIAIsuUUID,
-		)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			}
-			return nil, err
-		}
-
-		isuLastCondition := condition
-		conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
+		conditionLevel, err := calculateConditionLevel(isu.Condition)
 		if err != nil {
 			return nil, err
 		}
 		trendCondition := TrendCondition{
 			ID:        isu.ID,
-			Timestamp: isuLastCondition.Timestamp.Unix(),
+			Timestamp: isu.Timestamp.Unix(),
 		}
 		switch conditionLevel {
 		case "info":
@@ -1213,6 +1205,9 @@ func InsertIsuConditionLoop() {
 			if len(values) == 0 {
 				continue
 			}
+			log_.Println("==================INSERT=========================")
+			log_.Println("len:", len(values) / 6)
+			log_.Println("values[0] (jia_isu_uuid):", values[0])
 			_, err := db.Exec(
 				"INSERT INTO `isu_condition`"+
 					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
@@ -1222,6 +1217,23 @@ func InsertIsuConditionLoop() {
 			)
 			if err != nil {
 				log_.Printf("insert condition error: %v", err)
+			}
+			_, err = db.Exec(
+				"INSERT INTO `latest_isu_condition`"+
+					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
+					"	VALUES "+
+					strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?, ?),",
+						len(values)/6), ",")+
+					"	ON DUPLICATE KEY UPDATE"+
+					"	`timestamp`=IF(`timestamp` > VALUES(`timestamp`), `timestamp`, VALUES(`timestamp`)),"+
+					"	`is_sitting`=IF(`timestamp` > VALUES(`timestamp`), `is_sitting`, VALUES(`is_sitting`)),"+
+					"	`condition`=IF(`timestamp` > VALUES(`timestamp`), `condition`, VALUES(`condition`)),"+
+					"	`message`=IF(`timestamp` > VALUES(`timestamp`), `message`, VALUES(`message`)),"+
+					"	`condition_count`=IF(`timestamp` > VALUES(`timestamp`), `condition_count`, VALUES(`condition_count`))",
+				values...,
+			)
+			if err != nil {
+				log_.Printf("insert latest condition error: %v", err)
 			}
 			values = values[:0]
 		case vs := <-conditionCh:
