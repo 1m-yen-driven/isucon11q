@@ -339,7 +339,6 @@ func postInitialize(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 	sessionCache = sync.Map{}
-	idToLatestConditionServer.FlushAll()
 	cmd := exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
@@ -357,6 +356,21 @@ func postInitialize(c echo.Context) error {
 	if err != nil {
 		c.Logger().Errorf("db error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+	idToLatestConditionServer.FlushAll()
+	isuList := []IsuCondition{}
+	db.Select(&isuList, "SELECT * FROM `isu_condition`")
+	for _, isu := range isuList {
+		post := IsuLastCondition{}
+		uuid := isu.JIAIsuUUID
+		post.Condition = isu.Condition
+		post.Timestamp = isu.Timestamp
+		pre := IsuLastCondition{}
+		if !idToLatestConditionServer.Get(uuid, &pre) {
+			idToLatestConditionServer.Set(uuid, post)
+		} else if pre.Timestamp.Before(post.Timestamp) {
+			idToLatestConditionServer.Set(uuid, post)
+		}
 	}
 
 	return c.JSON(http.StatusOK, InitializeResponse{
@@ -1237,27 +1251,51 @@ func InsertIsuConditionLoop() {
 			if len(values) == 0 {
 				continue
 			}
-			_, err := db.Exec(
-				"INSERT INTO `isu_condition`"+
-					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
-					"	VALUES "+
-					strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?, ?),",
-						len(values)/6), ","), values...,
-			)
+			// _, err := db.Exec(
+			// 	"INSERT INTO `isu_condition`"+
+			// 		"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
+			// 		"	VALUES "+
+			// 		strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?, ?),",
+			// 			len(values)/6), ","), values...,
+			// )
+			// 			if err != nil {
+			// 	log_.Printf("insert condition error: %v", err)
+			// }
+
+			keys := []string{}
+			for i := 0; i < len(values); i += 6 {
+				keys = append(keys, values[i+0].(string))
+			}
+			mgot := idToLatestConditionServer.MGet(keys)
+			localMap := map[string]interface{}{}
 			for i := 0; i < len(values); i += 6 {
 				uuid := values[i+0].(string)
 				post := IsuLastCondition{}
 				post.Condition = values[i+3].(string)
 				post.Timestamp = values[i+1].(time.Time)
 				pre := IsuLastCondition{}
-				if !idToLatestConditionServer.Get(uuid, &pre) {
-					idToLatestConditionServer.Set(uuid, post)
-				} else if pre.Timestamp.Before(post.Timestamp) {
-					idToLatestConditionServer.Set(uuid, post)
+				if !mgot.Get(uuid, &pre) {
+					// サーバーにはない
+					preI, ok := localMap[uuid]
+					if !ok {
+						// どこにもない
+						localMap[uuid] = post
+					} else if preI.(IsuLastCondition).Timestamp.Before(post.Timestamp) {
+						// localMap にはある
+						localMap[uuid] = post
+					}
+				} else {
+					// サーバーにはある
+					if pre.Timestamp.Before(post.Timestamp) {
+						preI, ok := localMap[uuid]
+						if !ok {
+							localMap[uuid] = post
+						} else if preI.(IsuLastCondition).Timestamp.Before(post.Timestamp) {
+							// localMap にはある
+							localMap[uuid] = post
+						}
+					}
 				}
-			}
-			if err != nil {
-				log_.Printf("insert condition error: %v", err)
 			}
 			values = values[:0]
 		case vs := <-conditionCh:
