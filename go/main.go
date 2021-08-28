@@ -56,6 +56,7 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
+	existsIsu = sync.Map{}
 )
 
 type Config struct {
@@ -334,6 +335,7 @@ func postInitialize(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 	sessionCache = sync.Map{}
+	existsIsu = sync.Map{}
 	cmd := exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
@@ -675,7 +677,7 @@ func postIsu(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	existsIsu.Store(jiaIsuUUID, struct{}{})
 	isuExistenceCheckGroup.Forget(jiaIsuUUID)
 
 	return c.JSON(http.StatusCreated, isu)
@@ -1260,22 +1262,24 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	exist, err, _ := isuExistenceCheckGroup.Do(jiaIsuUUID, func() (interface{}, error) {
-		var i int
-		err := db.Get(&i, "SELECT 1 FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return false, nil
-			}
-			return false, err
-		}
-		return true, nil
-	})
+	_, exist := existsIsu.Load(jiaIsuUUID)
+
+	// exist, err, _ := isuExistenceCheckGroup.Do(jiaIsuUUID, func() (interface{}, error) {
+	// 	var i int
+	// 	err := db.Get(&i, "SELECT 1 FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
+	// 	if err != nil {
+	// 		if err == sql.ErrNoRows {
+	// 			return false, nil
+	// 		}
+	// 		return false, err
+	// 	}
+	// 	return true, nil
+	// })
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	if !(exist.(bool)) {
+	if !exist {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
