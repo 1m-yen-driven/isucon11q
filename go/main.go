@@ -1200,7 +1200,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 	return res, nil
 }
 
-const conditionInsertInterval = 500 * time.Millisecond
+const conditionInsertInterval = 10 * time.Millisecond
 
 var conditionCh = make(chan []interface{}, 100)
 
