@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	log_ "log"
-	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -215,7 +214,7 @@ func main() {
 	go trendForgetLoop()
 	go InsertIsuConditionLoop()
 	e := echo.New()
-	e.Debug = true
+	e.Debug = false // false : for json indent
 	e.Logger.SetLevel(log.DEBUG)
 
 	e.Use(middleware.Logger())
@@ -1006,7 +1005,8 @@ func getIsuConditions(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	return c.JSON(http.StatusOK, conditionsResponse)
+	respJson, _ := json.Marshal(conditionsResponse)
+	return c.JSONBlob(http.StatusOK, respJson)
 }
 
 // ISUのコンディションをDBから取得
@@ -1107,7 +1107,8 @@ func getTrend(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	return c.JSON(http.StatusOK, res)
+	respJson, _ := json.Marshal(res)
+	return c.JSONBlob(http.StatusOK, respJson)
 }
 
 func trendForgetLoop() {
@@ -1233,13 +1234,6 @@ func InsertIsuConditionLoop() {
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
-	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-	dropProbability := 0.0
-	if rand.Float64() <= dropProbability {
-		// c.Logger().Warnf("drop post isu condition request")
-		return c.NoContent(http.StatusAccepted)
-	}
-
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	if jiaIsuUUID == "" {
 		return c.String(http.StatusBadRequest, "missing: jia_isu_uuid")
