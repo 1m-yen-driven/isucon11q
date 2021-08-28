@@ -54,6 +54,8 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
+	isMasterServerIP              = MyServerIsOnMasterServerIP()
+	idToLatestConditionServer     = NewSyncMapServerConn(GetMasterServerAddress()+":8884", isMasterServerIP)
 )
 
 type Config struct {
@@ -93,6 +95,11 @@ type IsuCondition struct {
 	Message        string    `db:"message"`
 	CreatedAt      time.Time `db:"created_at"`
 	ConditionCount int       `db:"condition_count"`
+}
+
+type IsuLastCondition struct {
+	Condition string    `db:"condition"`
+	Timestamp time.Time `db:"timestamp"`
 }
 
 type MySQLConnectionEnv struct {
@@ -332,6 +339,7 @@ func postInitialize(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 	sessionCache = sync.Map{}
+	idToLatestConditionServer.FlushAll()
 	cmd := exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
@@ -1164,20 +1172,16 @@ func getTrendImpl() ([]TrendResponse, error) {
 		characterWarningIsuConditions[character] = []*TrendCondition{}
 		characterCriticalIsuConditions[character] = []*TrendCondition{}
 	}
+	keys := []string{}
 	for _, isu := range isuList {
-		condition := IsuCondition{}
-		err = db.Get(&condition,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
-			isu.JIAIsuUUID,
-		)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			}
-			return nil, err
+		keys = append(keys, isu.JIAIsuUUID)
+	}
+	mgot := idToLatestConditionServer.MGet(keys)
+	for _, isu := range isuList {
+		isuLastCondition := IsuLastCondition{}
+		if !mgot.Get(isu.JIAIsuUUID, &isuLastCondition) {
+			continue
 		}
-
-		isuLastCondition := condition
 		conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
 		if err != nil {
 			return nil, err
@@ -1240,6 +1244,18 @@ func InsertIsuConditionLoop() {
 					strings.TrimRight(strings.Repeat("(?, ?, ?, ?, ?, ?),",
 						len(values)/6), ","), values...,
 			)
+			for i := 0; i < len(values); i += 6 {
+				uuid := values[i+0].(string)
+				post := IsuLastCondition{}
+				post.Condition = values[i+3].(string)
+				post.Timestamp = values[i+1].(time.Time)
+				pre := IsuLastCondition{}
+				if !idToLatestConditionServer.Get(uuid, &pre) {
+					idToLatestConditionServer.Set(uuid, post)
+				} else if pre.Timestamp.Before(post.Timestamp) {
+					idToLatestConditionServer.Set(uuid, post)
+				}
+			}
 			if err != nil {
 				log_.Printf("insert condition error: %v", err)
 			}
@@ -1273,7 +1289,7 @@ func postIsuCondition(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	if count == 0 {
-		return c.String(http.StatusNotFound, "not found: isu")
+		return c.String(http.StatusNotFound, "ntigot found: isu")
 	}
 
 	values := []interface{}{}
@@ -1283,10 +1299,8 @@ func postIsuCondition(c echo.Context) error {
 		if !isValidConditionFormat(cond.Condition) {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
-
 		values = append(values, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message, strings.Count(cond.Condition, "=true"))
 	}
-
 	conditionCh <- values
 
 	return c.NoContent(http.StatusAccepted)
