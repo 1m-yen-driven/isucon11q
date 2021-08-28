@@ -1129,9 +1129,16 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 	res := []TrendResponse{}
 
-	isuList := []Isu{}
+	type IsuWithCondition struct{
+		Isu
+		Condition string `db:"condition"`
+		Timestamp time.Time `db:"timestamp"`
+	}
+	isuList := []IsuWithCondition{}
 	err = db.Select(&isuList,
-		"SELECT * FROM `isu`",
+		"WITH `c` AS ("+
+		"  SELECT `jia_isu_uuid`, `timestamp`, LAST_VALUE(`condition`) OVER (PARTITION  BY `jia_isu_uuid` ORDER BY `timestamp`) AS `condition` FROM `isu_condition`"+
+		") SELECT `isu`.`character`, `isu`.`id`, `c`.* FROM `isu` INNER JOIN `c` ON `isu`.`jia_isu_uuid` = `c`.`jia_isu_uuid`",
 	)
 	if err != nil {
 		return nil, err
@@ -1146,26 +1153,13 @@ func getTrendImpl() ([]TrendResponse, error) {
 		characterCriticalIsuConditions[character] = []*TrendCondition{}
 	}
 	for _, isu := range isuList {
-		condition := IsuCondition{}
-		err = db.Get(&condition,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
-			isu.JIAIsuUUID,
-		)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			}
-			return nil, err
-		}
-
-		isuLastCondition := condition
-		conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
+		conditionLevel, err := calculateConditionLevel(isu.Condition)
 		if err != nil {
 			return nil, err
 		}
 		trendCondition := TrendCondition{
 			ID:        isu.ID,
-			Timestamp: isuLastCondition.Timestamp.Unix(),
+			Timestamp: isu.Timestamp.Unix(),
 		}
 		switch conditionLevel {
 		case "info":
