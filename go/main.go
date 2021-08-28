@@ -213,7 +213,7 @@ func main() {
 	go trendForgetLoop()
 	go InsertIsuConditionLoop()
 	e := echo.New()
-	e.Debug = false
+	e.Debug = true
 	e.Logger.SetLevel(log.ERROR)
 
 	e.Use(middleware.Logger())
