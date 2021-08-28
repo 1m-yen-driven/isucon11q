@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -479,47 +480,79 @@ func getIsuList(c echo.Context) error {
 	}
 
 	responseList := []GetIsuListResponse{}
+	responseChan := make(chan GetIsuListResponse, len(isuList))
+	errorChan := make(chan error)
+	var wg sync.WaitGroup
+	wg.Add(len(isuList))
+	go func() {
+		wg.Wait()
+		close(responseChan)
+	}()
 	for _, isu := range isuList {
-		var lastCondition IsuCondition
-		foundLastCondition := true
-		err = tx.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
-			isu.JIAIsuUUID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				foundLastCondition = false
-			} else {
-				c.Logger().Errorf("db error: %v", err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
-		}
-
-		var formattedCondition *GetIsuConditionResponse
-		if foundLastCondition {
-			conditionLevel, err := calculateConditionLevel(lastCondition.Condition)
+		go func(isu Isu) {
+			var lastCondition IsuCondition
+			foundLastCondition := true
+			err = tx.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
+				isu.JIAIsuUUID)
 			if err != nil {
-				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
+				if errors.Is(err, sql.ErrNoRows) {
+					foundLastCondition = false
+				} else {
+					c.Logger().Errorf("db error: %v", err)
+					errorChan <- c.NoContent(http.StatusInternalServerError)
+				}
 			}
 
-			formattedCondition = &GetIsuConditionResponse{
-				JIAIsuUUID:     lastCondition.JIAIsuUUID,
-				IsuName:        isu.Name,
-				Timestamp:      lastCondition.Timestamp.Unix(),
-				IsSitting:      lastCondition.IsSitting,
-				Condition:      lastCondition.Condition,
-				ConditionLevel: conditionLevel,
-				Message:        lastCondition.Message,
-			}
-		}
+			var formattedCondition *GetIsuConditionResponse
+			if foundLastCondition {
+				conditionLevel, err := calculateConditionLevel(lastCondition.Condition)
+				if err != nil {
+					c.Logger().Error(err)
+					errorChan <- c.NoContent(http.StatusInternalServerError)
+				}
 
-		res := GetIsuListResponse{
-			ID:                 isu.ID,
-			JIAIsuUUID:         isu.JIAIsuUUID,
-			Name:               isu.Name,
-			Character:          isu.Character,
-			LatestIsuCondition: formattedCondition}
-		responseList = append(responseList, res)
+				formattedCondition = &GetIsuConditionResponse{
+					JIAIsuUUID:     lastCondition.JIAIsuUUID,
+					IsuName:        isu.Name,
+					Timestamp:      lastCondition.Timestamp.Unix(),
+					IsSitting:      lastCondition.IsSitting,
+					Condition:      lastCondition.Condition,
+					ConditionLevel: conditionLevel,
+					Message:        lastCondition.Message,
+				}
+			}
+
+			res := GetIsuListResponse{
+				ID:                 isu.ID,
+				JIAIsuUUID:         isu.JIAIsuUUID,
+				Name:               isu.Name,
+				Character:          isu.Character,
+				LatestIsuCondition: formattedCondition}
+			responseChan <- res
+			// responseList = append(responseList, res)
+		}(isu)
 	}
+
+	for {
+		select {
+		case a, ok := <-responseChan:
+			if !ok {
+				goto hoge
+			}
+			responseList = append(responseList, a)
+			wg.Done()
+			continue
+		case err := <-errorChan:
+			return err
+		}
+	}
+
+hoge:
+
+	// sort responseList  order by id desc
+	sort.Slice(responseList, func(i, j int) bool {
+		return responseList[i].ID > responseList[j].ID
+	})
 
 	err = tx.Commit()
 	if err != nil {
