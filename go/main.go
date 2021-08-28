@@ -214,7 +214,7 @@ func main() {
 	go InsertIsuConditionLoop()
 	e := echo.New()
 	e.Debug = true
-	e.Logger.SetLevel(log.ERROR)
+	e.Logger.SetLevel(log.DEBUG)
 
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
