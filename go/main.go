@@ -351,6 +351,8 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	isuExistenceCheckGroup = singleflight.Group{}
+
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -671,6 +673,8 @@ func postIsu(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	isuExistenceCheckGroup.Forget(jiaIsuUUID)
 
 	return c.JSON(http.StatusCreated, isu)
 }
@@ -1230,6 +1234,8 @@ func InsertIsuConditionLoop() {
 	}
 }
 
+var isuExistenceCheckGroup singleflight.Group
+
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
@@ -1246,17 +1252,26 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	var count int
-	err = db.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?", jiaIsuUUID)
+	exist, err, _ := isuExistenceCheckGroup.Do(jiaIsuUUID, func() (interface{}, error) {
+		var i int
+		err := db.Get(&i, "SELECT 1 FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	})
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	if count == 0 {
+	if !(exist.(bool)) {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
-	values := []interface{}{}
+	values := make([]interface{}, 0, len(req)*6)
 	for _, cond := range req {
 		timestamp := time.Unix(cond.Timestamp, 0)
 
