@@ -1129,16 +1129,22 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 	res := []TrendResponse{}
 
-	type IsuWithCondition struct{
+	type IsuWithCondition struct {
 		Isu
-		Condition string `db:"condition"`
+		Condition string    `db:"condition"`
 		Timestamp time.Time `db:"timestamp"`
 	}
 	isuList := []IsuWithCondition{}
 	err = db.Select(&isuList,
 		"WITH `c` AS ("+
-		"  SELECT `jia_isu_uuid`, `timestamp`, LAST_VALUE(`condition`) OVER (PARTITION  BY `jia_isu_uuid` ORDER BY `timestamp`) AS `condition` FROM `isu_condition`"+
-		") SELECT `isu`.`character`, `isu`.`id`, `c`.* FROM `isu` INNER JOIN `c` ON `isu`.`jia_isu_uuid` = `c`.`jia_isu_uuid`",
+			"  SELECT "+
+			"    `jia_isu_uuid`, "+
+			"    LAST_VALUE(`timestamp`) OVER (PARTITION  BY `jia_isu_uuid` ORDER BY `timestamp`) AS `ts`, "+
+			"    LAST_VALUE(`condition`) OVER (PARTITION  BY `jia_isu_uuid` ORDER BY `timestamp`) AS `condition` "+
+			"  FROM `isu_condition`"+
+			") SELECT "+
+			"  `isu`.`character`, `isu`.`id`, `c`.`jia_isu_uuid`, `c`.`condition`, `c`.`ts` AS `timestamp` "+
+			"FROM `isu` INNER JOIN `c` ON `isu`.`jia_isu_uuid` = `c`.`jia_isu_uuid`",
 	)
 	if err != nil {
 		return nil, err
