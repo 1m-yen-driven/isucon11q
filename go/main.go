@@ -345,6 +345,11 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	isuList := []Isu{}
+	db.Select(&isuList, "select `jia_isu_uuid` from `isu`")
+	for _, isu := range isuList {
+		existsIsu.Store(isu.JIAIsuUUID, struct{}{})
+	}
 	_, err = db.Exec(
 		"INSERT INTO `isu_association_config` (`name`, `url`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `url` = VALUES(`url`)",
 		"jia_service_url",
