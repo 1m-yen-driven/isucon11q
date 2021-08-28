@@ -1141,7 +1141,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 			"    `jia_isu_uuid`, "+
 			"    LAST_VALUE(`timestamp`) OVER (PARTITION  BY `jia_isu_uuid` ORDER BY `timestamp`) AS `ts`, "+
 			"    LAST_VALUE(`condition`) OVER (PARTITION  BY `jia_isu_uuid` ORDER BY `timestamp`) AS `condition` "+
-			"  FROM `isu_condition`"+
+			"  FROM `isu_condition` GROUP BY `jia_isu_uuid`"+
 			") SELECT "+
 			"  `isu`.`character`, `isu`.`id`, `c`.`jia_isu_uuid`, `c`.`condition`, `c`.`ts` AS `timestamp` "+
 			"FROM `isu` INNER JOIN `c` ON `isu`.`jia_isu_uuid` = `c`.`jia_isu_uuid`",
