@@ -1208,7 +1208,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 const conditionInsertInterval = 10 * time.Millisecond
 
-var conditionCh = make(chan []interface{}, 100)
+var conditionCh = make(chan []interface{}, 10000)
 
 func InsertIsuConditionLoop() {
 	ticker := time.Tick(conditionInsertInterval)
