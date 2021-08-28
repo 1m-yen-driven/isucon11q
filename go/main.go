@@ -216,8 +216,8 @@ func main() {
 	go trendForgetLoop()
 	go InsertIsuConditionLoop()
 	e := echo.New()
-	e.Debug = false // false : for json indent
-	e.Logger.SetLevel(log.DEBUG)
+	e.Debug = false              // false : for json indent
+	e.Logger.SetLevel(log.ERROR) // DEBUG
 
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -900,7 +900,11 @@ func generateIsuGraphResponse(tx *sqlx.Tx, jiaIsuUUID string, graphDate time.Tim
 
 // 複数のISUのコンディションからグラフの一つのデータ点を計算
 func calculateGraphDataPoint(isuConditions []IsuCondition) (GraphDataPoint, error) {
-	conditionsCount := map[string]int{"is_broken": 0, "is_dirty": 0, "is_overweight": 0}
+	conditionsCount := map[string]int{
+		"is_broken":     0,
+		"is_dirty":      0,
+		"is_overweight": 0,
+	}
 	rawScore := 0
 	for _, condition := range isuConditions {
 		badConditionsCount := 0
@@ -908,14 +912,19 @@ func calculateGraphDataPoint(isuConditions []IsuCondition) (GraphDataPoint, erro
 		if !isValidConditionFormat(condition.Condition) {
 			return GraphDataPoint{}, fmt.Errorf("invalid condition format")
 		}
-
-		for _, condStr := range strings.Split(condition.Condition, ",") {
-			keyValue := strings.Split(condStr, "=")
-
-			conditionName := keyValue[0]
-			if keyValue[1] == "true" {
-				conditionsCount[conditionName] += 1
-				badConditionsCount++
+		str := condition.Condition
+		for i, chr := range str {
+			if chr == '=' && str[i+1:i+5] == "true" && i >= 1 {
+				if str[i-1] == 'n' {
+					conditionsCount["is_broken"] += 1
+					badConditionsCount++
+				} else if str[i-1] == 'y' {
+					conditionsCount["is_dirty"] += 1
+					badConditionsCount++
+				} else if str[i-1] == 't' {
+					conditionsCount["is_overweight"] += 1
+					badConditionsCount++
+				}
 			}
 		}
 
