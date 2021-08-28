@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	log_ "log"
-	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -48,6 +48,7 @@ const (
 var (
 	db                  *sqlx.DB
 	sessionStore        sessions.Store
+	sessionCache        = sync.Map{}
 	mySQLConnectionData *MySQLConnectionEnv
 
 	jiaJWTSigningKey *ecdsa.PublicKey
@@ -215,8 +216,8 @@ func main() {
 	go trendForgetLoop()
 	go InsertIsuConditionLoop()
 	e := echo.New()
-	e.Debug = true
-	e.Logger.SetLevel(log.DEBUG)
+	e.Debug = false              // false : for json indent
+	e.Logger.SetLevel(log.ERROR) // DEBUG
 
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -275,18 +276,28 @@ func getSession(r *http.Request) (*sessions.Session, error) {
 }
 
 func getUserIDFromSession(c echo.Context) (string, int, error) {
-	session, err := getSession(c.Request())
+	r := c.Request()
+	cookie, err := r.Cookie(sessionName)
 	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("failed to get session: %v", err)
-	}
-	_jiaUserID, ok := session.Values["jia_user_id"]
-	if !ok {
 		return "", http.StatusUnauthorized, fmt.Errorf("no session")
 	}
+	var jiaUserID string
+	if val, ok := sessionCache.Load(cookie.Value); ok {
+		jiaUserID = val.(string)
+	} else {
+		session, err := getSession(r)
+		if err != nil {
+			return "", http.StatusUnauthorized, fmt.Errorf("no session")
+		}
+		userID, ok := session.Values["jia_user_id"]
+		if !ok {
+			return "", http.StatusUnauthorized, fmt.Errorf("no session")
+		}
+		jiaUserID = userID.(string)
+		sessionCache.Store(cookie.Value, jiaUserID)
+	}
 
-	jiaUserID := _jiaUserID.(string)
 	var count int
-
 	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
 		jiaUserID)
 	if err != nil {
@@ -320,7 +331,7 @@ func postInitialize(c echo.Context) error {
 	if err != nil {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
-
+	sessionCache = sync.Map{}
 	cmd := exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
@@ -869,7 +880,11 @@ func generateIsuGraphResponse(tx *sqlx.Tx, jiaIsuUUID string, graphDate time.Tim
 
 // 複数のISUのコンディションからグラフの一つのデータ点を計算
 func calculateGraphDataPoint(isuConditions []IsuCondition) (GraphDataPoint, error) {
-	conditionsCount := map[string]int{"is_broken": 0, "is_dirty": 0, "is_overweight": 0}
+	conditionsCount := map[string]int{
+		"is_broken":     0,
+		"is_dirty":      0,
+		"is_overweight": 0,
+	}
 	rawScore := 0
 	for _, condition := range isuConditions {
 		badConditionsCount := 0
@@ -877,14 +892,19 @@ func calculateGraphDataPoint(isuConditions []IsuCondition) (GraphDataPoint, erro
 		if !isValidConditionFormat(condition.Condition) {
 			return GraphDataPoint{}, fmt.Errorf("invalid condition format")
 		}
-
-		for _, condStr := range strings.Split(condition.Condition, ",") {
-			keyValue := strings.Split(condStr, "=")
-
-			conditionName := keyValue[0]
-			if keyValue[1] == "true" {
-				conditionsCount[conditionName] += 1
-				badConditionsCount++
+		str := condition.Condition
+		for i, chr := range str {
+			if chr == '=' && str[i+1:i+5] == "true" && i >= 1 {
+				if str[i-1] == 'n' {
+					conditionsCount["is_broken"] += 1
+					badConditionsCount++
+				} else if str[i-1] == 'y' {
+					conditionsCount["is_dirty"] += 1
+					badConditionsCount++
+				} else if str[i-1] == 't' {
+					conditionsCount["is_overweight"] += 1
+					badConditionsCount++
+				}
 			}
 		}
 
@@ -986,7 +1006,8 @@ func getIsuConditions(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	return c.JSON(http.StatusOK, conditionsResponse)
+	respJson, _ := json.Marshal(conditionsResponse)
+	return c.JSONBlob(http.StatusOK, respJson)
 }
 
 // ISUのコンディションをDBから取得
@@ -1087,7 +1108,8 @@ func getTrend(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	return c.JSON(http.StatusOK, res)
+	respJson, _ := json.Marshal(res)
+	return c.JSONBlob(http.StatusOK, respJson)
 }
 
 func trendForgetLoop() {
@@ -1101,18 +1123,15 @@ func trendForgetLoop() {
 }
 
 func getTrendImpl() ([]TrendResponse, error) {
-	characterList := []string{}
-	err := db.Select(&characterList, "SELECT `character` FROM `isu` GROUP BY `character`")
-	if err != nil {
-		return nil, err
+	characterList := []string{
+		"いじっぱり", "うっかりや", "おくびょう", "おだやか", "おっとり",
+		"おとなしい", "がんばりや", "きまぐれ", "さみしがり", "しんちょう",
+		"すなお", "ずぶとい", "せっかち", "てれや", "なまいき",
+		"のうてんき", "のんき", "ひかえめ", "まじめ", "むじゃき",
+		"やんちゃ", "ゆうかん", "ようき", "れいせい", "わんぱく",
 	}
-
-	res := []TrendResponse{}
-
 	isuList := []Isu{}
-	err = db.Select(&isuList,
-		"SELECT * FROM `isu`",
-	)
+	err := db.Select(&isuList, "SELECT * FROM `isu`")
 	if err != nil {
 		return nil, err
 	}
@@ -1158,6 +1177,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 
 	}
 
+	res := []TrendResponse{}
 	for _, c := range characterList {
 		sort.Slice(characterInfoIsuConditions[c], func(i, j int) bool {
 			return characterInfoIsuConditions[c][i].Timestamp > characterInfoIsuConditions[c][j].Timestamp
@@ -1213,13 +1233,6 @@ func InsertIsuConditionLoop() {
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
-	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-	dropProbability := 0.0
-	if rand.Float64() <= dropProbability {
-		// c.Logger().Warnf("drop post isu condition request")
-		return c.NoContent(http.StatusAccepted)
-	}
-
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	if jiaIsuUUID == "" {
 		return c.String(http.StatusBadRequest, "missing: jia_isu_uuid")
