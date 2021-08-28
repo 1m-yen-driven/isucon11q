@@ -800,7 +800,7 @@ func generateIsuGraphResponse(tx *sqlx.Tx, jiaIsuUUID string, graphDate time.Tim
 	var startTimeInThisHour time.Time
 	var conditions []IsuCondition
 
-	err := tx.Select(&conditions, "SELECT `condition`, `timestamp`, `is_sitting` FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND ? <= `timestamp` AND `timestamp` <= ? ORDER BY `timestamp` ASC", jiaIsuUUID, graphDate, graphDate.Add(24 * time.Hour))
+	err := tx.Select(&conditions, "SELECT `condition`, `timestamp`, `is_sitting` FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND ? <= `timestamp` AND `timestamp` <= ? ORDER BY `timestamp` ASC", jiaIsuUUID, graphDate, graphDate.Add(24*time.Hour))
 	if err != nil {
 		return nil, fmt.Errorf("db error: %v", err)
 	}
@@ -1095,7 +1095,7 @@ func calculateConditionLevel(condition string) (string, error) {
 var trendGroup = new(singleflight.Group)
 
 const trendGroupKey = "trendGroupKey"
-const trendGroupForgetInterval = 500 * time.Millisecond
+const trendGroupForgetInterval = 100 * time.Millisecond
 
 // GET /api/trend
 // ISUの性格毎の最新のコンディション情報
