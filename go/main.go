@@ -11,6 +11,7 @@ import (
 	log_ "log"
 	"math/rand"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"sort"
@@ -210,11 +211,12 @@ func init() {
 }
 
 func main() {
+	go func() { log_.Println(http.ListenAndServe(":9009", nil)) }()
 	go trendForgetLoop()
 	go InsertIsuConditionLoop()
 	e := echo.New()
-	e.Debug = false
-	e.Logger.SetLevel(log.ERROR)
+	e.Debug = true
+	e.Logger.SetLevel(log.DEBUG)
 
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
