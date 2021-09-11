@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"database/sql"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-redis/redis/v8"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/isucon/isucon11-qualify/isucondition/lib"
@@ -28,6 +30,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	"github.com/shamaton/msgpack"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -56,7 +59,7 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
-	existsIsu = sync.Map{}
+	existsIsu                     = sync.Map{}
 )
 
 type Config struct {
@@ -201,6 +204,24 @@ func (mc *MySQLConnectionEnv) ConnectDB() (*sqlx.DB, error) {
 	return sqlx.Open("mysql", dsn)
 }
 
+// Encode / Decode
+func EncodePtr(valuePtr interface{}) string {
+	d, _ := msgpack.Encode(valuePtr)
+	return string(d)
+}
+func DecodePtrStringCmd(input *redis.StringCmd, valuePtr interface{}) {
+	msgpack.Decode([]byte(input.Val()), valuePtr)
+}
+func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
+	msgpack.Decode([]byte(partsOfSliceCmd.(string)), valuePtr)
+}
+
+var rdb = redis.NewClient(&redis.Options{
+	Addr: "127.0.0.1:6379",
+	DB:   0, // 0 - 15
+})
+var defaultImageBytes []byte
+
 func init() {
 	sessionStore = sessions.NewCookieStore([]byte(getEnv("SESSION_KEY", "isucondition")))
 
@@ -265,7 +286,7 @@ func main() {
 		e.Logger.Fatalf("missing: POST_ISUCONDITION_TARGET_BASE_URL")
 		return
 	}
-
+	defaultImageBytes, _ = ioutil.ReadFile(defaultIconFilePath)
 	serverPort := fmt.Sprintf(":%v", getEnv("SERVER_APP_PORT", "3000"))
 	e.Logger.Fatal(e.Start(serverPort))
 }
@@ -359,9 +380,21 @@ func postInitialize(c echo.Context) error {
 		c.Logger().Errorf("db error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	ctx := context.Background()
+	rdb.FlushDB(ctx)
+	conditions := []IsuCondition{}
+	db.Select(&conditions, "select * from `isu_condition`")
+	pipe := rdb.Pipeline()
+	for _, cond := range conditions {
+		z := redis.Z{
+			float64(cond.Timestamp.Unix()),
+			cond.Condition,
+		}
+		pipe.ZAdd(ctx, cond.JIAIsuUUID, &z)
+	}
+	pipe.Exec(ctx)
+	pipe.Close()
 	isuExistenceCheckGroup = singleflight.Group{}
-
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -493,7 +526,7 @@ func getIsuList(c echo.Context) error {
 	isuList := []Isu{}
 	err = tx.Select(
 		&isuList,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
+		"SELECT `jia_isu_uuid`,`name`,`character`,`id` FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
 		jiaUserID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
@@ -580,11 +613,7 @@ func postIsu(c echo.Context) error {
 	var image []byte
 
 	if useDefaultImage {
-		image, err = ioutil.ReadFile(defaultIconFilePath)
-		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
+		image = defaultImageBytes
 	} else {
 		file, err := fh.Open()
 		if err != nil {
@@ -1144,7 +1173,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 		"やんちゃ", "ゆうかん", "ようき", "れいせい", "わんぱく",
 	}
 	isuList := []Isu{}
-	err := db.Select(&isuList, "SELECT * FROM `isu`")
+	err := db.Select(&isuList, "SELECT `id`,`jia_isu_uuid`,`character` FROM `isu`")
 	if err != nil {
 		return nil, err
 	}
@@ -1157,27 +1186,24 @@ func getTrendImpl() ([]TrendResponse, error) {
 		characterWarningIsuConditions[character] = []*TrendCondition{}
 		characterCriticalIsuConditions[character] = []*TrendCondition{}
 	}
+	cmds := []*redis.ZSliceCmd{}
+	pipe := rdb.Pipeline()
+	defer pipe.Close()
+	ctx := context.Background()
 	for _, isu := range isuList {
-		condition := IsuCondition{}
-		err = db.Get(&condition,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
-			isu.JIAIsuUUID,
-		)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			}
-			return nil, err
-		}
+		cmds = append(cmds, pipe.ZRevRangeWithScores(ctx, isu.JIAIsuUUID, 0, 0))
+	}
+	pipe.Exec(ctx)
 
-		isuLastCondition := condition
-		conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
-		if err != nil {
-			return nil, err
+	for i, isu := range isuList {
+		zs, err := cmds[i].Result()
+		if err != nil || len(zs) == 0 {
+			continue
 		}
+		conditionLevel, err := calculateConditionLevel(zs[0].Member.(string))
 		trendCondition := TrendCondition{
 			ID:        isu.ID,
-			Timestamp: isuLastCondition.Timestamp.Unix(),
+			Timestamp: int64(zs[0].Score),
 		}
 		switch conditionLevel {
 		case "info":
@@ -1187,7 +1213,6 @@ func getTrendImpl() ([]TrendResponse, error) {
 		case "critical":
 			characterCriticalIsuConditions[isu.Character] = append(characterCriticalIsuConditions[isu.Character], &trendCondition)
 		}
-
 	}
 
 	res := []TrendResponse{}
@@ -1226,6 +1251,17 @@ func InsertIsuConditionLoop() {
 			if len(values) == 0 {
 				continue
 			}
+			pipe := rdb.Pipeline()
+			ctx := context.Background()
+			for i := 0; i < len(values); i += 6 {
+				z := redis.Z{
+					float64((values[i+1]).(time.Time).Unix()),
+					values[i+3],
+				}
+				pipe.ZAdd(ctx, values[i].(string), &z)
+			}
+			pipe.Exec(ctx)
+			pipe.Close()
 			_, err := db.Exec(
 				"INSERT INTO `isu_condition`"+
 					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
@@ -1269,17 +1305,6 @@ func postIsuCondition(c echo.Context) error {
 
 	_, exist := existsIsu.Load(jiaIsuUUID)
 
-	// exist, err, _ := isuExistenceCheckGroup.Do(jiaIsuUUID, func() (interface{}, error) {
-	// 	var i int
-	// 	err := db.Get(&i, "SELECT 1 FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
-	// 	if err != nil {
-	// 		if err == sql.ErrNoRows {
-	// 			return false, nil
-	// 		}
-	// 		return false, err
-	// 	}
-	// 	return true, nil
-	// })
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
