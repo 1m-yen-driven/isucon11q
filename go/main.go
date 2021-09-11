@@ -220,6 +220,7 @@ var rdb = redis.NewClient(&redis.Options{
 	Addr: "127.0.0.1:6379",
 	DB:   0, // 0 - 15
 })
+var defaultImageBytes []byte
 
 func init() {
 	sessionStore = sessions.NewCookieStore([]byte(getEnv("SESSION_KEY", "isucondition")))
@@ -285,7 +286,7 @@ func main() {
 		e.Logger.Fatalf("missing: POST_ISUCONDITION_TARGET_BASE_URL")
 		return
 	}
-
+	defaultImageBytes, _ = ioutil.ReadFile(defaultIconFilePath)
 	serverPort := fmt.Sprintf(":%v", getEnv("SERVER_APP_PORT", "3000"))
 	e.Logger.Fatal(e.Start(serverPort))
 }
@@ -394,7 +395,6 @@ func postInitialize(c echo.Context) error {
 	pipe.Exec(ctx)
 	pipe.Close()
 	isuExistenceCheckGroup = singleflight.Group{}
-
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -526,7 +526,7 @@ func getIsuList(c echo.Context) error {
 	isuList := []Isu{}
 	err = tx.Select(
 		&isuList,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
+		"SELECT `jia_isu_uuid`,`name`,`character`,`id` FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
 		jiaUserID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
@@ -613,11 +613,7 @@ func postIsu(c echo.Context) error {
 	var image []byte
 
 	if useDefaultImage {
-		image, err = ioutil.ReadFile(defaultIconFilePath)
-		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
+		image = defaultImageBytes
 	} else {
 		file, err := fh.Open()
 		if err != nil {
@@ -1177,7 +1173,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 		"やんちゃ", "ゆうかん", "ようき", "れいせい", "わんぱく",
 	}
 	isuList := []Isu{}
-	err := db.Select(&isuList, "SELECT * FROM `isu`")
+	err := db.Select(&isuList, "SELECT `id`,`jia_isu_uuid`,`character` FROM `isu`")
 	if err != nil {
 		return nil, err
 	}
@@ -1192,8 +1188,8 @@ func getTrendImpl() ([]TrendResponse, error) {
 	}
 	cmds := []*redis.ZSliceCmd{}
 	pipe := rdb.Pipeline()
-	ctx := context.Background()
 	defer pipe.Close()
+	ctx := context.Background()
 	for _, isu := range isuList {
 		cmds = append(cmds, pipe.ZRevRangeWithScores(ctx, isu.JIAIsuUUID, 0, 0))
 	}
