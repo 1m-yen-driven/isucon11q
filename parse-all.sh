@@ -12,8 +12,3 @@ for app in app1 app2 app3; do
     ssh $app -tt "bash logs/parse.sh $path"
   fi
 done
-
-# if [[ $1 != "skip" ]]; then
-#   # 必要ならSlackに通知
-#   curl -X POST --data-urlencode "payload={\"text\": \"$path のログが更新されました。https://sagisawa.0am.jp/hyaku/logs/$path\"}" https://hooks.slack.com/services/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
-# fi
