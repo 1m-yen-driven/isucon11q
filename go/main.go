@@ -216,10 +216,18 @@ func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
 	msgpack.Decode([]byte(partsOfSliceCmd.(string)), valuePtr)
 }
 
-var rdb = redis.NewClient(&redis.Options{
-	Addr: "127.0.0.1:6379",
+// for Z condition
+var rdb0 = redis.NewClient(&redis.Options{
+	Addr: "192.168.0.13:6379",
 	DB:   0, // 0 - 15
 })
+
+// for userId -> exists(int)
+var rdb1 = redis.NewClient(&redis.Options{
+	Addr: "192.168.0.13:6379",
+	DB:   1, // 0 - 15
+})
+
 var defaultImageBytes []byte
 
 func init() {
@@ -299,7 +307,7 @@ func getSession(r *http.Request) (*sessions.Session, error) {
 	return session, nil
 }
 
-func getUserIDFromSession(c echo.Context) (string, int, error) {
+func getUserIDFromSession(c echo.Context, use_redis ...bool) (string, int, error) {
 	r := c.Request()
 	cookie, err := r.Cookie(sessionName)
 	if err != nil {
@@ -320,18 +328,21 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 		jiaUserID = userID.(string)
 		sessionCache.Store(cookie.Value, jiaUserID)
 	}
-
-	var count int
-	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
-		jiaUserID)
-	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("db error: %v", err)
+	if len(use_redis) > 0 {
+		ctx := c.Request().Context()
+		if rdb1.Exists(ctx, jiaUserID).Val() == 0 {
+			return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
+		}
+	} else {
+		var count int
+		err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?", jiaUserID)
+		if err != nil {
+			return "", http.StatusInternalServerError, fmt.Errorf("db error: %v", err)
+		}
+		if count == 0 {
+			return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
+		}
 	}
-
-	if count == 0 {
-		return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
-	}
-
 	return jiaUserID, 0, nil
 }
 
@@ -381,19 +392,32 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	ctx := context.Background()
-	rdb.FlushDB(ctx)
-	conditions := []IsuCondition{}
-	db.Select(&conditions, "select * from `isu_condition`")
-	pipe := rdb.Pipeline()
-	for _, cond := range conditions {
-		z := redis.Z{
-			float64(cond.Timestamp.Unix()),
-			cond.Condition,
+	{
+		rdb0.FlushDB(ctx)
+		conditions := []IsuCondition{}
+		db.Select(&conditions, "select * from `isu_condition`")
+		pipe := rdb0.Pipeline()
+		for _, cond := range conditions {
+			z := redis.Z{
+				float64(cond.Timestamp.Unix()),
+				cond.Condition,
+			}
+			pipe.ZAdd(ctx, cond.JIAIsuUUID, &z)
 		}
-		pipe.ZAdd(ctx, cond.JIAIsuUUID, &z)
+		pipe.Exec(ctx)
+		pipe.Close()
 	}
-	pipe.Exec(ctx)
-	pipe.Close()
+	{
+		rdb1.FlushDB(ctx)
+		ids := []string{}
+		db.Select(&ids, "select `jia_user_id` from `user`")
+		pipe := rdb1.Pipeline()
+		for _, id := range ids {
+			pipe.Set(ctx, id, "1", 0)
+		}
+		pipe.Exec(ctx)
+		pipe.Close()
+	}
 	isuExistenceCheckGroup = singleflight.Group{}
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
@@ -440,7 +464,8 @@ func postAuthentication(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	ctx := c.Request().Context()
+	rdb1.Set(ctx, jiaUserID, "1", 0)
 	session, err := getSession(c.Request())
 	if err != nil {
 		c.Logger().Error(err)
@@ -1098,14 +1123,16 @@ const trendGroupForgetInterval = 100 * time.Millisecond
 func getTrend(c echo.Context) error {
 	res, err, _ := trendGroup.Do(trendGroupKey, func() (interface{}, error) {
 		res, err := getTrendImpl()
-		return res, err
+		if err != nil {
+			return res, err
+		}
+		return json.Marshal(res)
 	})
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	respJson, _ := json.Marshal(res)
-	return c.JSONBlob(http.StatusOK, respJson)
+	return c.JSONBlob(http.StatusOK, res.([]byte))
 }
 
 func trendForgetLoop() {
@@ -1141,7 +1168,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 		characterCriticalIsuConditions[character] = []*TrendCondition{}
 	}
 	cmds := []*redis.ZSliceCmd{}
-	pipe := rdb.Pipeline()
+	pipe := rdb0.Pipeline()
 	defer pipe.Close()
 	ctx := context.Background()
 	for _, isu := range isuList {
@@ -1205,7 +1232,7 @@ func InsertIsuConditionLoop() {
 			if len(values) == 0 {
 				continue
 			}
-			pipe := rdb.Pipeline()
+			pipe := rdb0.Pipeline()
 			ctx := context.Background()
 			for i := 0; i < len(values); i += 6 {
 				z := redis.Z{
