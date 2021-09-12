@@ -216,10 +216,18 @@ func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
 	msgpack.Decode([]byte(partsOfSliceCmd.(string)), valuePtr)
 }
 
-var rdb = redis.NewClient(&redis.Options{
-	Addr: "127.0.0.1:6379",
+// for Z condition
+var rdb0 = redis.NewClient(&redis.Options{
+	Addr: "192.168.0.13:6379",
 	DB:   0, // 0 - 15
 })
+
+// for userId -> exists(int)
+var rdb1 = redis.NewClient(&redis.Options{
+	Addr: "192.168.0.13:6379",
+	DB:   1, // 0 - 15
+})
+
 var defaultImageBytes []byte
 
 func init() {
@@ -320,18 +328,10 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 		jiaUserID = userID.(string)
 		sessionCache.Store(cookie.Value, jiaUserID)
 	}
-
-	var count int
-	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
-		jiaUserID)
-	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("db error: %v", err)
-	}
-
-	if count == 0 {
+	ctx := c.Request().Context()
+	if rdb1.Exists(ctx, jiaUserID).Val() == 0 {
 		return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
 	}
-
 	return jiaUserID, 0, nil
 }
 
@@ -381,20 +381,34 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	ctx := context.Background()
-	rdb.FlushDB(ctx)
-	conditions := []IsuCondition{}
-	db.Select(&conditions, "select * from `isu_condition`")
-	pipe := rdb.Pipeline()
-	for _, cond := range conditions {
-		z := redis.Z{
-			float64(cond.Timestamp.Unix()),
-			cond.Condition,
+	{
+		rdb0.FlushDB(ctx)
+		conditions := []IsuCondition{}
+		db.Select(&conditions, "select * from `isu_condition`")
+		pipe := rdb0.Pipeline()
+		for _, cond := range conditions {
+			z := redis.Z{
+				float64(cond.Timestamp.Unix()),
+				cond.Condition,
+			}
+			pipe.ZAdd(ctx, cond.JIAIsuUUID, &z)
 		}
-		pipe.ZAdd(ctx, cond.JIAIsuUUID, &z)
+		pipe.Exec(ctx)
+		pipe.Close()
 	}
-	pipe.Exec(ctx)
-	pipe.Close()
+	{
+		rdb1.FlushDB(ctx)
+		ids := []string{}
+		db.Select(&ids, "select `jia_user_id` from `user`")
+		pipe := rdb1.Pipeline()
+		for _, id := range ids {
+			pipe.Set(ctx, id, "1", 0)
+		}
+		pipe.Exec(ctx)
+		pipe.Close()
+	}
 	isuExistenceCheckGroup = singleflight.Group{}
+	needUpdateTrendImpl = true
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -434,13 +448,8 @@ func postAuthentication(c echo.Context) error {
 	if !ok {
 		return c.String(http.StatusBadRequest, "invalid JWT payload")
 	}
-
-	_, err = db.Exec("INSERT IGNORE INTO user (`jia_user_id`) VALUES (?)", jiaUserID)
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
+	ctx := c.Request().Context()
+	rdb1.Set(ctx, jiaUserID, "1", 0)
 	session, err := getSession(c.Request())
 	if err != nil {
 		c.Logger().Error(err)
@@ -1091,21 +1100,23 @@ func calculateConditionLevel(condition string) (string, error) {
 var trendGroup = new(singleflight.Group)
 
 const trendGroupKey = "trendGroupKey"
-const trendGroupForgetInterval = 100 * time.Millisecond
+const trendGroupForgetInterval = 10 * time.Millisecond
 
 // GET /api/trend
 // ISUの性格毎の最新のコンディション情報
 func getTrend(c echo.Context) error {
 	res, err, _ := trendGroup.Do(trendGroupKey, func() (interface{}, error) {
 		res, err := getTrendImpl()
-		return res, err
+		if err != nil {
+			return res, err
+		}
+		return res, nil
 	})
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	respJson, _ := json.Marshal(res)
-	return c.JSONBlob(http.StatusOK, respJson)
+	return c.JSONBlob(http.StatusOK, res.([]byte))
 }
 
 func trendForgetLoop() {
@@ -1118,7 +1129,13 @@ func trendForgetLoop() {
 	}
 }
 
-func getTrendImpl() ([]TrendResponse, error) {
+var needUpdateTrendImpl = true
+var cachedTrendImplJson = []byte{}
+
+func getTrendImpl() ([]byte, error) {
+	if !needUpdateTrendImpl {
+		return cachedTrendImplJson, nil
+	}
 	characterList := []string{
 		"いじっぱり", "うっかりや", "おくびょう", "おだやか", "おっとり",
 		"おとなしい", "がんばりや", "きまぐれ", "さみしがり", "しんちょう",
@@ -1141,7 +1158,7 @@ func getTrendImpl() ([]TrendResponse, error) {
 		characterCriticalIsuConditions[character] = []*TrendCondition{}
 	}
 	cmds := []*redis.ZSliceCmd{}
-	pipe := rdb.Pipeline()
+	pipe := rdb0.Pipeline()
 	defer pipe.Close()
 	ctx := context.Background()
 	for _, isu := range isuList {
@@ -1188,8 +1205,9 @@ func getTrendImpl() ([]TrendResponse, error) {
 				Critical:  characterCriticalIsuConditions[c],
 			})
 	}
-
-	return res, nil
+	cachedTrendImplJson, _ = json.Marshal(res)
+	needUpdateTrendImpl = false
+	return cachedTrendImplJson, nil
 }
 
 const conditionInsertInterval = 10 * time.Millisecond
@@ -1205,17 +1223,6 @@ func InsertIsuConditionLoop() {
 			if len(values) == 0 {
 				continue
 			}
-			pipe := rdb.Pipeline()
-			ctx := context.Background()
-			for i := 0; i < len(values); i += 6 {
-				z := redis.Z{
-					float64((values[i+1]).(time.Time).Unix()),
-					values[i+3],
-				}
-				pipe.ZAdd(ctx, values[i].(string), &z)
-			}
-			pipe.Exec(ctx)
-			pipe.Close()
 			_, err := db.Exec(
 				"INSERT INTO `isu_condition`"+
 					"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `condition_count`)"+
